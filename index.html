@@ -1,0 +1,283 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Isyanation Guest Check-in</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 18px;
+      font-family: Arial, sans-serif;
+      background: #f5f4ef; color: #24392d;
+    }
+    main { max-width: 520px; margin: auto; }
+    header {
+      background: #203b2d; color: white; text-align: center;
+      padding: 24px 16px; border-radius: 18px; margin-bottom: 16px;
+    }
+    header small { color: #d9bb78; letter-spacing: 2px; }
+    h1 { font-size: 22px; margin: 12px 0 8px; }
+    .card {
+      background: white; border-radius: 16px; padding: 18px;
+      margin-bottom: 14px; box-shadow: 0 2px 10px #0000000a;
+    }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat { background: #f4f3ee; border-radius: 12px; padding: 12px 4px; text-align: center; }
+    .stat strong { display: block; font-size: 24px; }
+    .stat span { font-size: 12px; color: #666; }
+    input, button {
+      width: 100%; padding: 13px; border-radius: 10px;
+      font-size: 16px; margin-top: 8px;
+    }
+    input { border: 1px solid #d6d6d0; }
+    button { border: 0; cursor: pointer; font-weight: bold; }
+    .primary { background: #203b2d; color: white; }
+    .secondary { background: #ecece7; color: #26382e; }
+    .danger { background: #a82c2c; color: white; }
+    #reader { width: 100%; overflow: hidden; }
+    #reader video { border-radius: 12px; }
+    #message {
+      padding: 14px; border-radius: 12px; margin-top: 12px;
+      white-space: pre-wrap; overflow-wrap: anywhere; display: none;
+    }
+    .success { background: #e1f4e6; color: #155b2b; }
+    .error { background: #fde7e5; color: #8c211b; }
+    .muted { font-size: 13px; color: #686d68; line-height: 1.5; }
+    #dashboard { display: none; }
+    #busy { display: none; text-align: center; padding: 10px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <small>ISYANATION · 12TH ANNIVERSARY</small>
+    <h1>INSIDE THE EKLEKTIKO UNIVERSE</h1>
+    <div>Guest Check-in · 7 November 2026</div>
+  </header>
+
+  <section class="card" id="loginPanel">
+    <h2>Login Panitia</h2>
+    <p class="muted">Masukkan PIN panitia untuk membuka scanner.</p>
+    <form id="loginForm">
+      <input id="pin" type="password" inputmode="numeric"
+        autocomplete="current-password" placeholder="PIN panitia" required>
+      <button class="primary" type="submit">Login</button>
+    </form>
+  </section>
+
+  <section id="dashboard">
+    <div class="card stats">
+      <div class="stat"><strong id="total">—</strong><span>Total tamu</span></div>
+      <div class="stat"><strong id="present">—</strong><span>Sudah hadir</span></div>
+      <div class="stat"><strong id="remaining">—</strong><span>Belum hadir</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Scan tiket peserta</h2>
+      <p class="muted">Izinkan akses kamera jika diminta. Arahkan kamera ke QR peserta.</p>
+      <div id="reader"></div>
+      <button class="primary" id="startBtn">Mulai Scan Kamera</button>
+      <button class="secondary" id="stopBtn">Stop Kamera</button>
+      <div id="busy">Memproses tiket…</div>
+      <div id="message" role="status" aria-live="polite"></div>
+    </div>
+
+    <div class="card">
+      <h3>Verifikasi manual</h3>
+      <p class="muted">Gunakan jika kamera bermasalah. Masukkan token dari QR, bukan Ticket ID.</p>
+      <input id="manualToken" placeholder="Token dari QR">
+      <button class="secondary" id="verifyBtn">Verifikasi Token</button>
+      <button class="secondary" id="refreshBtn">Perbarui Statistik</button>
+      <button class="danger" id="logoutBtn">Logout</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const API_URL = "https://isyanation-checkin-api.liyimadrid21.workers.dev/";
+let sessionToken = "";
+let scanner = null;
+let processing = false;
+
+const $ = id => document.getElementById(id);
+
+async function api(action, data = {}) {
+  const response = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...data })
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Permintaan gagal.");
+  return result;
+}
+
+function showMessage(text, success) {
+  const box = $("message");
+  box.textContent = text;
+  box.className = success ? "success" : "error";
+  box.style.display = "block";
+}
+
+function setBusy(value) {
+  processing = value;
+  $("busy").style.display = value ? "block" : "none";
+  $("verifyBtn").disabled = value;
+  $("startBtn").disabled = value;
+}
+
+$("loginForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const pin = $("pin").value;
+  $("pin").disabled = true;
+  try {
+    const result = await api("login", { pin });
+    if (!result.session) throw new Error("Login tidak memberikan sesi.");
+    sessionToken = result.session;
+    $("loginPanel").style.display = "none";
+    $("dashboard").style.display = "block";
+    await refreshStats();
+    showMessage("Login berhasil. Scanner siap digunakan.", true);
+  } catch (error) {
+    alert("Login gagal: " + error.message);
+  } finally {
+    $("pin").disabled = false;
+    $("pin").value = "";
+  }
+});
+
+async function refreshStats() {
+  const result = await api("getStats", { session: sessionToken });
+  if (result.total !== undefined) {
+    $("total").textContent = result.total;
+    $("present").textContent = result.present;
+    $("remaining").textContent = result.remaining;
+  } else {
+    throw new Error("Format statistik tidak sesuai.");
+  }
+}
+
+async function processToken(token) {
+  if (processing || !sessionToken) return;
+  setBusy(true);
+  try {
+    const result = await api("checkIn", {
+      session: sessionToken,
+      token: String(token || "").trim()
+    });
+
+    if (result.ok) {
+      showMessage(
+        "✓ CHECK-IN BERHASIL\n" +
+        "Nama: " + (result.name || "-") + "\n" +
+        "Tiket: " + (result.ticketId || "-") + "\n" +
+        "Waktu: " + (result.time || "-"),
+        true
+      );
+      $("manualToken").value = "";
+    } else {
+      let text = "✕ " + (result.message || "Check-in ditolak.");
+      if (result.name) text += "\nNama: " + result.name;
+      if (result.ticketId) text += "\nTiket: " + result.ticketId;
+      if (result.previousTime) text += "\nCheck-in sebelumnya: " + result.previousTime;
+      showMessage(text, false);
+    }
+    await refreshStats();
+  } catch (error) {
+    showMessage("Gagal memverifikasi: " + error.message, false);
+  } finally {
+    setBusy(false);
+  }
+}
+
+$("startBtn").addEventListener("click", async () => {
+  if (!sessionToken) return;
+  if (typeof Html5Qrcode === "undefined") {
+    showMessage("Library scanner gagal dimuat. Periksa koneksi internet.", false);
+    return;
+  }
+  try {
+    if (!scanner) scanner = new Html5Qrcode("reader");
+    const cameras = await Html5Qrcode.getCameras();
+    if (!cameras || !cameras.length) throw new Error("Kamera tidak ditemukan.");
+    const camera = cameras.find(c => /back|rear|environment/i.test(c.label)) || cameras[0];
+    $("startBtn").disabled = true;
+    await scanner.start(
+      camera.id,
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      async decodedText => {
+        if (processing) return;
+        await scanner.pause(true);
+        await processToken(decodedText);
+        if (scanner && sessionToken) {
+          try { await scanner.resume(); } catch (_) {}
+        }
+      },
+      () => {}
+    );
+    showMessage("Kamera aktif. Arahkan ke QR peserta.", true);
+  } catch (error) {
+    showMessage(
+      "Kamera tidak dapat dibuka: " + error.message +
+      "\nPeriksa izin kamera browser atau gunakan verifikasi manual.",
+      false
+    );
+  } finally {
+    $("startBtn").disabled = false;
+  }
+});
+
+$("stopBtn").addEventListener("click", async () => {
+  if (scanner) {
+    try {
+      if (scanner.isScanning) await scanner.stop();
+      scanner.clear();
+      scanner = null;
+    } catch (_) {}
+  }
+  showMessage("Kamera dihentikan.", true);
+});
+
+$("verifyBtn").addEventListener("click", async () => {
+  const token = $("manualToken").value.trim();
+  if (!token) {
+    showMessage("Masukkan token QR terlebih dahulu.", false);
+    return;
+  }
+  await processToken(token);
+});
+
+$("manualToken").addEventListener("keydown", event => {
+  if (event.key === "Enter") $("verifyBtn").click();
+});
+
+$("refreshBtn").addEventListener("click", async () => {
+  try {
+    await refreshStats();
+    showMessage("Statistik berhasil diperbarui.", true);
+  } catch (error) {
+    showMessage(error.message, false);
+  }
+});
+
+$("logoutBtn").addEventListener("click", async () => {
+  if (scanner) {
+    try {
+      if (scanner.isScanning) await scanner.stop();
+      scanner.clear();
+    } catch (_) {}
+  }
+  try { await api("logout", { session: sessionToken }); } catch (_) {}
+  sessionToken = "";
+  scanner = null;
+  $("dashboard").style.display = "none";
+  $("loginPanel").style.display = "block";
+  showMessage("", false);
+  $("message").style.display = "none";
+});
+</script>
+</body>
+</html>
